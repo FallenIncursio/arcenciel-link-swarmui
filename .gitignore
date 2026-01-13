@@ -1,0 +1,24 @@
+# Build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temp
+*.tmp
+*.swp
+*.swo
+
+# Editors
+.vs/
+.vscode/
+.idea/

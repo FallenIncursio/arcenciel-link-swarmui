@@ -1,0 +1,215 @@
+using System.IO;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using Newtonsoft.Json.Linq;
+using SwarmUI.Utils;
+
+namespace ArcEnCiel.Link.Swarm;
+
+internal static class ArcEnCielLinkSidecars
+{
+    public static async Task GenerateForExistingAsync(
+        ArcEnCielLinkWorker worker,
+        ArcEnCielLinkConfig config,
+        HttpClient http,
+        CancellationToken token
+    )
+    {
+        IReadOnlyDictionary<string, string> fileMap = worker.Hashes.GetModelFilesByHash();
+        if (fileMap.Count == 0)
+        {
+            return;
+        }
+
+        JObject? metas = await FetchSidecarMetaAsync(config, http, fileMap.Keys, token);
+        if (metas is null)
+        {
+            return;
+        }
+
+        foreach (KeyValuePair<string, string> entry in fileMap)
+        {
+            if (!metas.TryGetValue(entry.Key, out JToken? metaToken))
+            {
+                continue;
+            }
+
+            if (metaToken is not JObject meta)
+            {
+                continue;
+            }
+
+            string path = entry.Value;
+            string infoPath = Path.ChangeExtension(path, ".arcenciel.info");
+            if (File.Exists(infoPath))
+            {
+                continue;
+            }
+
+            await WriteSidecarsAsync(worker, config, http, meta, entry.Key, path, token);
+        }
+    }
+
+    public static async Task WriteSidecarsAsync(
+        ArcEnCielLinkWorker worker,
+        ArcEnCielLinkConfig config,
+        HttpClient http,
+        JObject meta,
+        string hash,
+        string modelPath,
+        CancellationToken token
+    )
+    {
+        string? previewName = await SavePreviewAsync(http, meta.Value<string>("preview"), modelPath, token);
+        WriteInfoFiles(meta, hash, previewName, modelPath);
+        if (config.SaveHtmlPreview)
+        {
+            WriteHtmlPreview(meta, hash, previewName, modelPath);
+        }
+    }
+
+    public static void WriteInfoFiles(JObject meta, string hash, string? previewName, string modelPath)
+    {
+        string infoPath = Path.ChangeExtension(modelPath, ".arcenciel.info");
+
+        Dictionary<string, object?> info = new()
+        {
+            ["schema"] = 1,
+            ["modelId"] = meta.Value<int?>("modelId"),
+            ["versionId"] = meta.Value<int?>("versionId"),
+            ["name"] = meta.Value<string>("modelTitle"),
+            ["type"] = meta.Value<string>("type"),
+            ["about"] = meta.Value<string>("aboutThisVersion") ?? meta.Value<string>("about"),
+            ["description"] = meta.Value<string>("modelDescription") ?? meta.Value<string>("description"),
+            ["activation text"] = string.Join(" || ", meta["activationTags"]?.Values<string>() ?? Array.Empty<string>()),
+            ["sha256"] = hash,
+            ["previewFile"] = previewName,
+            ["arcencielUrl"] = meta.Value<int?>("modelId") is { } modelId ? $"https://arcenciel.io/models/{modelId}" : null,
+        };
+
+        string infoJson = JsonSerializer.Serialize(info, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(infoPath, infoJson, Encoding.UTF8);
+
+        Dictionary<string, object?> sdMeta = new()
+        {
+            ["description"] = info["about"],
+            ["sd version"] = "unknown",
+            ["activation text"] = string.Join(" || ", meta["activationTags"]?.Values<string>() ?? Array.Empty<string>()),
+            ["preferred weight"] = 1.0,
+            ["notes"] = info["arcencielUrl"],
+        };
+        string sdJson = JsonSerializer.Serialize(sdMeta, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(Path.ChangeExtension(modelPath, ".json"), sdJson, Encoding.UTF8);
+    }
+
+    public static void WriteHtmlPreview(JObject meta, string hash, string? previewName, string modelPath)
+    {
+        StringBuilder html = new();
+        html.AppendLine("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">");
+        html.AppendLine($"<title>{EscapeHtml(meta.Value<string>("modelTitle") ?? "ArcEnCiel Model")}</title>");
+        html.AppendLine("<style>");
+        html.AppendLine("body{font-family:system-ui, sans-serif; max-width:720px; margin:2rem auto; line-height:1.5}");
+        html.AppendLine("img{max-width:100%; border-radius:8px; box-shadow:0 2px 8px #0003}");
+        html.AppendLine("pre{background:#f8f8f8; padding:0.75rem 1rem; border-radius:6px; overflow:auto}");
+        html.AppendLine(".tag{display:inline-block; background:#eef; color:#226; padding:2px 6px;");
+        html.AppendLine("border-radius:4px; margin:2px; font-size:90%}");
+        html.AppendLine("</style>");
+        html.AppendLine($"<h1>{EscapeHtml(meta.Value<string>("modelTitle") ?? "")}</h1>");
+
+        if (!string.IsNullOrWhiteSpace(previewName))
+        {
+            html.AppendLine($"<img src=\"{EscapeHtml(previewName)}\" alt=\"preview\">");
+        }
+
+        if (!string.IsNullOrWhiteSpace(meta.Value<string>("aboutThisVersion")))
+        {
+            html.AppendLine($"<h2>About this version</h2><p>{EscapeHtml(meta.Value<string>("aboutThisVersion") ?? "")}</p>");
+        }
+
+        IEnumerable<string> tags = meta["activationTags"]?.Values<string>() ?? Array.Empty<string>();
+        if (tags.Any())
+        {
+            html.Append("<h2>Activation Tags</h2>");
+            foreach (string tag in tags)
+            {
+                html.Append($"<span class=\"tag\">{EscapeHtml(tag)}</span>");
+            }
+            html.AppendLine();
+        }
+
+        html.AppendLine($"<hr><p><small>Generated by <b>Arc en Ciel Link</b><br>sha256: {EscapeHtml(hash)}</small></p></html>");
+        File.WriteAllText(Path.ChangeExtension(modelPath, ".arcenciel.html"), html.ToString(), Encoding.UTF8);
+    }
+
+    private static async Task<JObject?> FetchSidecarMetaAsync(
+        ArcEnCielLinkConfig config,
+        HttpClient http,
+        IEnumerable<string> hashes,
+        CancellationToken token
+    )
+    {
+        string url = $"{config.BaseUrl.TrimEnd('/')}/sidecars/meta";
+        JObject payload = new()
+        {
+            ["hashes"] = new JArray(hashes)
+        };
+
+        HttpRequestMessage request = new(HttpMethod.Post, url)
+        {
+            Content = new StringContent(payload.ToString(), Encoding.UTF8, "application/json")
+        };
+        ArcEnCielLinkWorker.ApplyAuthHeaders(request, config);
+
+        try
+        {
+            HttpResponseMessage response = await http.SendAsync(request, token);
+            if (!response.IsSuccessStatusCode)
+            {
+                Logs.Error($"[AEC-LINK] Sidecar meta fetch failed: {response.StatusCode}");
+                return null;
+            }
+
+            string json = await response.Content.ReadAsStringAsync(token);
+            return JObject.Parse(json);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[AEC-LINK] Sidecar meta fetch failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static async Task<string?> SavePreviewAsync(HttpClient http, string? url, string modelPath, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return null;
+        }
+
+        string previewPath = Path.ChangeExtension(modelPath, ".preview.png");
+        if (File.Exists(previewPath))
+        {
+            previewPath = ArcEnCielLinkWorker.UniqueFilename(Path.GetDirectoryName(previewPath) ?? ".", Path.GetFileName(previewPath));
+        }
+
+        try
+        {
+            HttpResponseMessage response = await http.GetAsync(url, token);
+            response.EnsureSuccessStatusCode();
+            byte[] bytes = await response.Content.ReadAsByteArrayAsync(token);
+            await File.WriteAllBytesAsync(previewPath, bytes, token);
+            return Path.GetFileName(previewPath);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[AEC-LINK] Preview download failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static string EscapeHtml(string value)
+    {
+        return System.Net.WebUtility.HtmlEncode(value);
+    }
+}
