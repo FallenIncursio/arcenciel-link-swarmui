@@ -11,7 +11,7 @@ Link key support, remote worker control, inventory sync, and sidecar generation.
 - Model-aware routing for checkpoints, LoRAs, VAEs, and embeddings.
 - Background worker with retry back-off, disk-space guard, and SHA-256 verify.
 - Inventory sync so the dashboard knows what you already have.
-- Optional preview PNG, `.arcenciel.info`, and HTML quick-view sidecars.
+- Optional preview PNG, `.json`, and HTML quick-view sidecars.
 
 ---
 

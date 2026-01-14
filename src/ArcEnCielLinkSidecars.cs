@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Net.Http;
 using System.Text;
@@ -41,8 +42,7 @@ internal static class ArcEnCielLinkSidecars
             }
 
             string path = entry.Value;
-            string infoPath = Path.ChangeExtension(path, ".arcenciel.info");
-            if (File.Exists(infoPath))
+            if (HasArcEnCielSidecar(path))
             {
                 continue;
             }
@@ -62,42 +62,32 @@ internal static class ArcEnCielLinkSidecars
     )
     {
         string? previewName = await SavePreviewAsync(http, meta.Value<string>("preview"), modelPath, token);
-        WriteInfoFiles(meta, hash, previewName, modelPath);
+        WriteJsonSidecar(meta, hash, modelPath);
         if (config.SaveHtmlPreview)
         {
             WriteHtmlPreview(meta, hash, previewName, modelPath);
         }
     }
 
-    public static void WriteInfoFiles(JObject meta, string hash, string? previewName, string modelPath)
+    public static void WriteJsonSidecar(JObject meta, string hash, string modelPath)
     {
-        string infoPath = Path.ChangeExtension(modelPath, ".arcenciel.info");
+        string? arcencielUrl = meta.Value<int?>("modelId") is { } modelId
+            ? $"https://arcenciel.io/models/{modelId}"
+            : null;
+        string activationText = string.Join("; ", meta["activationTags"]?.Values<string>() ?? Array.Empty<string>());
 
-        Dictionary<string, object?> info = new()
-        {
-            ["schema"] = 1,
-            ["modelId"] = meta.Value<int?>("modelId"),
-            ["versionId"] = meta.Value<int?>("versionId"),
-            ["name"] = meta.Value<string>("modelTitle"),
-            ["type"] = meta.Value<string>("type"),
-            ["about"] = meta.Value<string>("aboutThisVersion") ?? meta.Value<string>("about"),
-            ["description"] = meta.Value<string>("modelDescription") ?? meta.Value<string>("description"),
-            ["activation text"] = string.Join(" || ", meta["activationTags"]?.Values<string>() ?? Array.Empty<string>()),
-            ["sha256"] = hash,
-            ["previewFile"] = previewName,
-            ["arcencielUrl"] = meta.Value<int?>("modelId") is { } modelId ? $"https://arcenciel.io/models/{modelId}" : null,
-        };
-
-        string infoJson = JsonSerializer.Serialize(info, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(infoPath, infoJson, Encoding.UTF8);
+        string? about = meta.Value<string>("aboutThisVersion") ?? meta.Value<string>("about");
+        string? description = string.IsNullOrWhiteSpace(about) ? arcencielUrl : about;
 
         Dictionary<string, object?> sdMeta = new()
         {
-            ["description"] = info["about"],
+            ["description"] = description,
             ["sd version"] = "unknown",
-            ["activation text"] = string.Join(" || ", meta["activationTags"]?.Values<string>() ?? Array.Empty<string>()),
+            ["activation text"] = activationText,
+            ["modelspec.trigger_phrase"] = activationText,
+            ["trigger_phrase"] = activationText,
             ["preferred weight"] = 1.0,
-            ["notes"] = info["arcencielUrl"],
+            ["notes"] = arcencielUrl,
         };
         string sdJson = JsonSerializer.Serialize(sdMeta, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(Path.ChangeExtension(modelPath, ".json"), sdJson, Encoding.UTF8);
@@ -211,5 +201,24 @@ internal static class ArcEnCielLinkSidecars
     private static string EscapeHtml(string value)
     {
         return System.Net.WebUtility.HtmlEncode(value);
+    }
+
+    private static bool HasArcEnCielSidecar(string modelPath)
+    {
+        string jsonPath = Path.ChangeExtension(modelPath, ".json");
+        if (!File.Exists(jsonPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            string content = File.ReadAllText(jsonPath);
+            return content.Contains("arcenciel.io/models/", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
