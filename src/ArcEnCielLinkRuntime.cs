@@ -39,7 +39,7 @@ internal static class ArcEnCielLinkRuntime
         }
     }
 
-    public static void ApplyWorkerState(bool enable, string? linkKey, string? apiKey)
+    public static void ApplyWorkerState(bool enable, string? linkKey)
     {
         lock (SyncRoot)
         {
@@ -48,11 +48,6 @@ internal static class ArcEnCielLinkRuntime
             if (linkKey is not null)
             {
                 Config.LinkKey = linkKey;
-            }
-
-            if (apiKey is not null)
-            {
-                Config.ApiKey = apiKey;
             }
 
             Config.Enabled = enable;

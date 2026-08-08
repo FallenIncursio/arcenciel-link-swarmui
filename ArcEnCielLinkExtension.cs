@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using SwarmUI.Accounts;
 using SwarmUI.Core;
 using SwarmUI.Utils;
@@ -13,6 +15,7 @@ public class ArcEnCielLinkExtension : Extension
     public override void OnInit()
     {
         ExtensionAuthor = "ArcEnCiel";
+        Version = ArcEnCielLinkProtocol.Version;
         Description = "ArcEnCiel Link worker extension for SwarmUI.";
         License = "MIT";
         ScriptFiles.Add("Assets/arcenciel_link_settings.js");
@@ -75,7 +78,6 @@ internal static class ArcEnCielLinkEndpoints
             {
                 baseUrl = config.BaseUrl,
                 linkKeySet = !string.IsNullOrWhiteSpace(config.LinkKey),
-                apiKeySet = !string.IsNullOrWhiteSpace(config.ApiKey),
                 enabled = config.Enabled,
                 minFreeMb = config.MinFreeMb,
                 maxRetries = config.MaxRetries,
@@ -100,21 +102,21 @@ internal static class ArcEnCielLinkEndpoints
                 return Results.Json(new { error = "payload required" }, statusCode: 400);
             }
 
+            if (payload.Extra is { Count: > 0 })
+            {
+                ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
+                return Results.Json(new { error = "Unsupported payload field" }, statusCode: 400);
+            }
+
             string? baseUrl = payload.BaseUrl?.Trim();
             if (payload.BaseUrl is not null)
             {
-                if (string.IsNullOrWhiteSpace(baseUrl))
+                if (!ArcEnCielLinkConfig.TryNormalizeBaseUrl(baseUrl, out string normalized, out string error))
                 {
                     ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
-                    return Results.Json(new { error = "Base URL required" }, statusCode: 400);
+                    return Results.Json(new { error }, statusCode: 400);
                 }
-
-                if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out Uri? uri) ||
-                    (uri.Scheme != "http" && uri.Scheme != "https"))
-                {
-                    ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
-                    return Results.Json(new { error = "Base URL must be http(s)" }, statusCode: 400);
-                }
+                baseUrl = normalized;
             }
 
             string? linkKey = payload.LinkKey?.Trim();
@@ -124,7 +126,6 @@ internal static class ArcEnCielLinkEndpoints
                 return Results.Json(new { error = "Invalid link key format" }, statusCode: 400);
             }
 
-            string? apiKey = payload.ApiKey?.Trim();
             if (payload.MinFreeMb.HasValue && payload.MinFreeMb.Value < 0)
             {
                 ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
@@ -153,11 +154,6 @@ internal static class ArcEnCielLinkEndpoints
                 if (payload.LinkKey is not null)
                 {
                     config.LinkKey = linkKey ?? "";
-                }
-
-                if (payload.ApiKey is not null)
-                {
-                    config.ApiKey = apiKey ?? "";
                 }
 
                 if (payload.Enabled.HasValue)
@@ -209,6 +205,12 @@ internal static class ArcEnCielLinkEndpoints
                 return Results.Json(new { error = "enable flag required" }, statusCode: 400);
             }
 
+            if (payload.Extra is { Count: > 0 })
+            {
+                ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
+                return Results.Json(new { error = "Unsupported payload field" }, statusCode: 400);
+            }
+
             string? linkKey = payload.LinkKey;
             if (linkKey is not null)
             {
@@ -220,13 +222,7 @@ internal static class ArcEnCielLinkEndpoints
                 }
             }
 
-            string? apiKey = payload.ApiKey;
-            if (apiKey is not null)
-            {
-                apiKey = apiKey.Trim();
-            }
-
-            ArcEnCielLinkRuntime.ApplyWorkerState(payload.Enable.Value, linkKey, apiKey);
+            ArcEnCielLinkRuntime.ApplyWorkerState(payload.Enable.Value, linkKey);
             bool workerOnline = ArcEnCielLinkRuntime.Worker.IsWorkerRunning;
 
             ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
@@ -253,7 +249,7 @@ internal static class ArcEnCielLinkEndpoints
             }
         });
 
-        app.MapPost("/arcenciel-link/generate_sidecars", async (HttpContext context) =>
+        app.MapPost("/arcenciel-link/generate_sidecars", (HttpContext context) =>
         {
             if (!ArcEnCielLinkCors.TryGetAllowedOrigin(context, out string? origin))
             {
@@ -316,19 +312,21 @@ internal static class ArcEnCielLinkEndpoints
     {
         public bool? Enable { get; set; }
         public string? LinkKey { get; set; }
-        public string? ApiKey { get; set; }
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? Extra { get; set; }
     }
 
     private sealed class SettingsPayload
     {
         public string? BaseUrl { get; set; }
         public string? LinkKey { get; set; }
-        public string? ApiKey { get; set; }
         public bool? Enabled { get; set; }
         public int? MinFreeMb { get; set; }
         public int? MaxRetries { get; set; }
         public int? BackoffBase { get; set; }
         public bool? SaveHtmlPreview { get; set; }
         public bool? AllowPrivateOrigins { get; set; }
+        [JsonExtensionData]
+        public Dictionary<string, JsonElement>? Extra { get; set; }
     }
 }

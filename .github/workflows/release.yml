@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          expected="${RELEASE_TAG#v}"
+          actual="$(sed -n 's/.*const string Version = "\([^"]*\)".*/\1/p' src/ArcEnCielLinkProtocol.cs)"
+          test "$expected" = "$actual"
+      - name: Package extension
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: zip -r "arcenciel-link-swarmui-${RELEASE_TAG}.zip" ArcEnCielLinkExtension.cs ArcEnCielLinkExtension.csproj Assets src README.md LICENSE -x "*/bin/*" "*/obj/*"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" "arcenciel-link-swarmui-${RELEASE_TAG}.zip" --verify-tag --generate-notes --title "ArcEnCiel Link SwarmUI ${RELEASE_TAG}"

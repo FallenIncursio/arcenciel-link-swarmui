@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: extension
+      - uses: actions/checkout@v4
+        with:
+          repository: mcmonkeyprojects/SwarmUI
+          path: swarm
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build SwarmUI reference assembly
+        working-directory: swarm
+        run: dotnet build src/SwarmUI.csproj --configuration Release --output src/bin/live_release
+      - name: Compile extension against SwarmUI
+        run: |
+          mkdir -p swarm/src/Extensions/ArcEnCielLink
+          cp -R extension/. swarm/src/Extensions/ArcEnCielLink/
+          dotnet build swarm/src/Extensions/ArcEnCielLink/ArcEnCielLinkExtension.csproj --configuration Release --warnaserror

@@ -22,6 +22,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private const int ServiceDisabledCloseCode = 1013;
 
     private readonly HttpClient _http;
+    private readonly HttpClient _privateHttp;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly ConcurrentQueue<LinkJobPayload> _jobQueue = new();
     private readonly SemaphoreSlim _jobSignal = new(0, int.MaxValue);
@@ -45,7 +46,6 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
 
     private string _baseUrl;
     private string _linkKey;
-    private string _apiKey;
     private int _minFreeMb;
     private int _maxRetries;
     private int _backoffBase;
@@ -53,15 +53,23 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
 
     public ArcEnCielLinkWorker(ArcEnCielLinkConfig config)
     {
-        _baseUrl = (config.BaseUrl ?? "").Trim().TrimEnd('/');
+        if (!ArcEnCielLinkConfig.TryNormalizeBaseUrl(config.BaseUrl, out _baseUrl, out string error))
+        {
+            throw new InvalidOperationException(error);
+        }
         _linkKey = (config.LinkKey ?? "").Trim();
-        _apiKey = (config.ApiKey ?? "").Trim();
         _minFreeMb = config.MinFreeMb;
         _maxRetries = config.MaxRetries;
         _backoffBase = config.BackoffBase;
         _saveHtmlPreview = config.SaveHtmlPreview;
         _http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("ArcEnCiel-Link/SwarmUI");
+        _privateHttp = new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false })
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
+        string userAgent = $"ArcEnCiel-Link-SwarmUI/{ArcEnCielLinkProtocol.Version}";
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        _privateHttp.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
     }
 
     public ArcEnCielLinkHashes Hashes => _hashes;
@@ -85,9 +93,12 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     {
         bool credsChanged = false;
 
-        string baseUrl = (config.BaseUrl ?? "").Trim().TrimEnd('/');
+        if (!ArcEnCielLinkConfig.TryNormalizeBaseUrl(config.BaseUrl, out string baseUrl, out string error))
+        {
+            Logs.Error($"[AEC-LINK] Base URL rejected: {error}");
+            return;
+        }
         string linkKey = (config.LinkKey ?? "").Trim();
-        string apiKey = (config.ApiKey ?? "").Trim();
 
         if (!string.Equals(_baseUrl, baseUrl, StringComparison.OrdinalIgnoreCase))
         {
@@ -98,12 +109,6 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         if (!string.Equals(_linkKey, linkKey, StringComparison.Ordinal))
         {
             _linkKey = linkKey;
-            credsChanged = true;
-        }
-
-        if (!string.Equals(_apiKey, apiKey, StringComparison.Ordinal))
-        {
-            _apiKey = apiKey;
             credsChanged = true;
         }
 
@@ -140,7 +145,6 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         {
             BaseUrl = _baseUrl,
             LinkKey = _linkKey,
-            ApiKey = _apiKey,
             SaveHtmlPreview = _saveHtmlPreview,
         };
 
@@ -165,19 +169,16 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         _jobSignal.Dispose();
         _runEvent.Dispose();
         _http.Dispose();
+        _privateHttp.Dispose();
     }
 
     public static void ApplyAuthHeaders(HttpRequestMessage request, ArcEnCielLinkConfig config)
     {
         string linkKey = (config.LinkKey ?? "").Trim();
-        string apiKey = (config.ApiKey ?? "").Trim();
+        ApplyProtocolHeaders(request);
         if (!string.IsNullOrWhiteSpace(linkKey))
         {
             request.Headers.TryAddWithoutValidation("x-link-key", linkKey);
-        }
-        else if (!string.IsNullOrWhiteSpace(apiKey))
-        {
-            request.Headers.TryAddWithoutValidation("x-api-key", apiKey);
         }
     }
 
@@ -278,7 +279,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 switch (type)
                 {
                     case "job":
-                        if (TryParseJob(msg, out LinkJobPayload? job))
+                        if (TryParseJob(msg, out LinkJobPayload job))
                         {
                             EnqueueJob(job);
                         }
@@ -308,7 +309,6 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         {
             bool enable = msg["enable"]?.Value<bool?>() ?? true;
             string? linkKey = msg.ContainsKey("linkKey") ? msg.Value<string>("linkKey") ?? "" : null;
-            string? apiKey = msg.ContainsKey("apiKey") ? msg.Value<string>("apiKey") ?? "" : null;
 
             if (linkKey is not null && !string.IsNullOrWhiteSpace(linkKey) && !IsValidLinkKey(linkKey))
             {
@@ -326,7 +326,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 return;
             }
 
-            ArcEnCielLinkRuntime.ApplyWorkerState(enable, linkKey, apiKey);
+            ArcEnCielLinkRuntime.ApplyWorkerState(enable, linkKey);
 
             await SendMessageAsync(
                 new
@@ -486,7 +486,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
 
         try
         {
-            await DownloadWithRetryAsync(url, tmpPath, ProgressCallback, token);
+            await DownloadWithRetryAsync(job, url, tmpPath, ProgressCallback, token);
             string shaLocal = ArcEnCielLinkHashesCompute(tmpPath);
             if (!string.IsNullOrWhiteSpace(job.Sha256) && !string.Equals(job.Sha256, shaLocal, StringComparison.OrdinalIgnoreCase))
             {
@@ -503,7 +503,6 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 {
                     BaseUrl = _baseUrl,
                     LinkKey = _linkKey,
-                    ApiKey = _apiKey,
                     SaveHtmlPreview = _saveHtmlPreview,
                 };
 
@@ -532,13 +531,13 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         }
     }
 
-    private async Task DownloadWithRetryAsync(string url, string tmpPath, Action<double> progress, CancellationToken token)
+    private async Task DownloadWithRetryAsync(LinkJobPayload job, string url, string tmpPath, Action<double> progress, CancellationToken token)
     {
         for (int attempt = 1; attempt <= _maxRetries; attempt++)
         {
             try
             {
-                await DownloadFileAsync(url, tmpPath, progress, token);
+                await DownloadFileAsync(job, url, tmpPath, progress, token);
                 return;
             }
             catch
@@ -566,9 +565,18 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         }
     }
 
-    private async Task DownloadFileAsync(string url, string tmpPath, Action<double> progress, CancellationToken token)
+    private async Task DownloadFileAsync(LinkJobPayload job, string url, string tmpPath, Action<double> progress, CancellationToken token)
     {
-        using HttpResponseMessage response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token);
+        using HttpRequestMessage request = new(HttpMethod.Get, url);
+        HttpClient client = _http;
+        if (job.DownloadGrant is not null || job.DownloadGrantHeader is not null)
+        {
+            ValidatePrivateDownload(job, url);
+            request.Headers.TryAddWithoutValidation(job.DownloadGrantHeader!, job.DownloadGrant!);
+            client = _privateHttp;
+        }
+
+        using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
         response.EnsureSuccessStatusCode();
 
         long total = response.Content.Headers.ContentLength ?? 0;
@@ -693,7 +701,11 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         Dictionary<string, object> payload = new()
         {
             ["type"] = "worker_state",
-            ["running"] = _workerEnabled
+            ["running"] = _workerEnabled,
+            ["client"] = ArcEnCielLinkProtocol.ClientId,
+            ["clientVersion"] = ArcEnCielLinkProtocol.Version,
+            ["protocolVersion"] = ArcEnCielLinkProtocol.ProtocolVersion,
+            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability }
         };
         await SendMessageAsync(payload, token);
     }
@@ -740,9 +752,9 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         _jobSignal.Release();
     }
 
-    private static bool TryParseJob(JObject msg, out LinkJobPayload? job)
+    private static bool TryParseJob(JObject msg, out LinkJobPayload job)
     {
-        job = null;
+        job = null!;
         if (msg["data"] is not JObject data)
         {
             return false;
@@ -765,6 +777,8 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             Id = id,
             TargetPath = targetPath,
             DownloadUrl = url,
+            DownloadGrant = data.Value<string>("downloadGrant"),
+            DownloadGrantHeader = data.Value<string>("downloadGrantHeader"),
             Sha256 = sha,
             Meta = meta
         };
@@ -773,7 +787,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
 
     private bool HasCredentials()
     {
-        return !string.IsNullOrWhiteSpace(_linkKey) || !string.IsNullOrWhiteSpace(_apiKey);
+        return !string.IsNullOrWhiteSpace(_linkKey);
     }
 
     private Uri BuildWsUri()
@@ -795,20 +809,14 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private void ConfigureSocket(ClientWebSocket socket)
     {
         socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+        socket.Options.SetRequestHeader("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
+        socket.Options.SetRequestHeader("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
+        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability);
 
         if (!string.IsNullOrWhiteSpace(_linkKey))
         {
             socket.Options.SetRequestHeader("x-link-key", _linkKey);
             string proto = BuildSubprotocol("link-key", _linkKey);
-            if (!string.IsNullOrWhiteSpace(proto))
-            {
-                socket.Options.AddSubProtocol(proto);
-            }
-        }
-        else if (!string.IsNullOrWhiteSpace(_apiKey))
-        {
-            socket.Options.SetRequestHeader("x-api-key", _apiKey);
-            string proto = BuildSubprotocol("api-key", _apiKey);
             if (!string.IsNullOrWhiteSpace(proto))
             {
                 socket.Options.AddSubProtocol(proto);
@@ -869,7 +877,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
 
         if (status == (WebSocketCloseStatus)UnauthorizedCloseCode)
         {
-            Logs.Error("[AEC-LINK] Authentication failed; check Link key or API key.");
+            Logs.Error("[AEC-LINK] Authentication failed; check the Link Key.");
             _suspendUntil = DateTimeOffset.UtcNow.AddMinutes(10);
             return;
         }
@@ -945,14 +953,18 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
 
     private void ApplyAuthHeaders(HttpRequestMessage request)
     {
+        ApplyProtocolHeaders(request);
         if (!string.IsNullOrWhiteSpace(_linkKey))
         {
             request.Headers.TryAddWithoutValidation("x-link-key", _linkKey);
         }
-        else if (!string.IsNullOrWhiteSpace(_apiKey))
-        {
-            request.Headers.TryAddWithoutValidation("x-api-key", _apiKey);
-        }
+    }
+
+    private static void ApplyProtocolHeaders(HttpRequestMessage request)
+    {
+        request.Headers.TryAddWithoutValidation("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
+        request.Headers.TryAddWithoutValidation("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
+        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability);
     }
 
     private string ResolveDownloadUrl(string urlRaw)
@@ -967,6 +979,39 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         string root = apiIndex >= 0 ? _baseUrl[..apiIndex] : _baseUrl;
         Uri baseUri = new(root.TrimEnd('/') + "/");
         return new Uri(baseUri, urlRaw.TrimStart('/')).ToString();
+    }
+
+    private void ValidatePrivateDownload(LinkJobPayload job, string url)
+    {
+        if (!string.Equals(job.DownloadGrantHeader, ArcEnCielLinkProtocol.DownloadGrantHeader, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Unsupported private download grant header");
+        }
+        if (string.IsNullOrWhiteSpace(job.DownloadGrant) || job.DownloadGrant.Length > 4096 ||
+            job.DownloadGrant.Any(character => character < 0x21 || character > 0x7E))
+        {
+            throw new InvalidOperationException("Invalid private download grant");
+        }
+
+        Uri target = new(url);
+        Uri configured = new(_baseUrl);
+        if (!string.Equals(target.Scheme, configured.Scheme, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(target.Host, configured.Host, StringComparison.OrdinalIgnoreCase) ||
+            target.Port != configured.Port)
+        {
+            throw new InvalidOperationException("Private download URL does not match the configured ArcEnCiel origin");
+        }
+        if (!target.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ARCENCIEL_DEV")))
+        {
+            throw new InvalidOperationException("Private downloads require HTTPS");
+        }
+        if (!target.AbsolutePath.StartsWith("/api/link/queue/", StringComparison.Ordinal) ||
+            !string.IsNullOrEmpty(target.UserInfo) ||
+            !string.IsNullOrEmpty(target.Fragment))
+        {
+            throw new InvalidOperationException("Private download URL has an unexpected format");
+        }
     }
 
     private bool HasEnoughFreeSpace(string path)
@@ -1002,6 +1047,8 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         public int Id { get; init; }
         public string TargetPath { get; init; } = "";
         public string? DownloadUrl { get; init; }
+        public string? DownloadGrant { get; init; }
+        public string? DownloadGrantHeader { get; init; }
         public string? Sha256 { get; init; }
         public JObject? Meta { get; init; }
     }

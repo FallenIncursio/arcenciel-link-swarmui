@@ -117,7 +117,7 @@ internal static class ArcEnCielLinkSidecars
             html.AppendLine($"<h2>About this version</h2><p>{EscapeHtml(meta.Value<string>("aboutThisVersion") ?? "")}</p>");
         }
 
-        IEnumerable<string> tags = meta["activationTags"]?.Values<string>() ?? Array.Empty<string>();
+        IEnumerable<string> tags = meta["activationTags"]?.Values<string>().OfType<string>() ?? Array.Empty<string>();
         if (tags.Any())
         {
             html.Append("<h2>Activation Tags</h2>");

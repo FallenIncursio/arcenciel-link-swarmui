@@ -101,7 +101,8 @@ internal static class ArcEnCielLinkPaths
 
         string full = Path.GetFullPath(combined);
         string baseFull = Path.GetFullPath(root);
-        if (!full.StartsWith(baseFull, StringComparison.OrdinalIgnoreCase))
+        string relative = Path.GetRelativePath(baseFull, full);
+        if (Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
         {
             throw new ArgumentException("Target path escapes allowed directories.");
         }
