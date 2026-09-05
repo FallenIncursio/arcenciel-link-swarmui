@@ -250,14 +250,27 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             _reconnectAttempts = 0;
             _credentialsDirty = false;
 
-            await SendWorkerStateAsync(token);
-            await SendPollAsync(token);
-
-            await ReceiveLoopAsync(socket, token);
-
-            HandleSocketClose(socket.CloseStatus, socket.CloseStatusDescription);
-            _socket = null;
-            CloseSocket();
+            try
+            {
+                await SendWorkerStateAsync(token);
+                await SendPollAsync(token);
+                await ReceiveLoopAsync(socket, token);
+                HandleSocketClose(socket.CloseStatus, socket.CloseStatusDescription);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex) when (ex is WebSocketException or IOException or ObjectDisposedException or OperationCanceledException)
+            {
+                // A lost transport must not end the long-lived connection supervisor.
+                // Do not log exception payloads, which can contain private connection details.
+                Logs.Warning("[AEC-LINK] WebSocket disconnected; reconnecting shortly.");
+            }
+            finally
+            {
+                if (ReferenceEquals(_socket, socket)) CloseSocket();
+            }
 
             await Task.Delay(TimeSpan.FromSeconds(NextReconnectDelaySeconds()), token);
         }

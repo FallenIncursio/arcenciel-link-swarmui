@@ -107,3 +107,5 @@ is retained; automatic recovery requires the updated ArcEnCiel server. Keep each
 Open [Link Hub](https://arcenciel.io/link) to choose your host and location, create or import a device key, and verify the setup. Local discovery runs only when requested; another computer or Google Colab connects directly without a local browser scan. Existing keys and downloads remain compatible.
 
 Workers advertise `setup_check_v1`. A setup check transfers a fixed 4 KiB file into the selected native model folder, flushes and reads it back, verifies SHA-256, and deletes the temporary file. The result is bound to one key and runtime; shared keys, paused or busy workers cannot complete the check. Stable errors explain storage, write, transfer and cleanup failures. The check does not install a model or alter download history. The `Finish setup` button appears only after verification.
+
+The worker also reconnects after an abrupt WebSocket transport loss or broker restart; the connection supervisor remains alive and re-announces the current runtime.
