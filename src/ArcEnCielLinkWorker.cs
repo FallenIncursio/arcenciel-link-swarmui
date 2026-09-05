@@ -34,6 +34,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private readonly Regex _randomPrefix = new(@"^(?:\d+_|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private ClientWebSocket? _socket;
+    private ArcEnCielLinkAttempt? _attempt;
     private Task? _socketTask;
     private Task? _workerTask;
     private Task? _inventoryTask;
@@ -305,6 +306,12 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             return;
         }
 
+        if (command == "cancel_job")
+        {
+            bool cancelled = _attempt?.Cancel(msg.Value<int?>("jobId") ?? 0, msg.Value<string>("attemptId"), msg.Value<string>("runtimeId")) ?? false;
+            await SendMessageAsync(new { type = "control_ack", command, requestId, ok = cancelled }, token);
+            return;
+        }
         if (command == "set_worker_state")
         {
             bool enable = msg["enable"]?.Value<bool?>() ?? true;
@@ -404,7 +411,16 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 continue;
             }
 
-            await ProcessJobAsync(job, token);
+            await using ArcEnCielLinkAttempt attempt = new(job.Id, job.AttemptId, _baseUrl, _http, ApplyAuthHeaders, token);
+            _attempt = attempt;
+            try
+            {
+                await attempt.StartAsync();
+                await ProcessJobAsync(job, attempt.Token);
+            }
+            catch (OperationCanceledException) { Logs.Info("[AEC-LINK] Download stopped"); }
+            catch (Exception ex) { Logs.Error($"[AEC-LINK] Attempt failed: {ex.Message}"); }
+            finally { _attempt = null; }
         }
     }
 
@@ -464,7 +480,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         }
 
         string destPath = UniqueFilename(targetDir, cleanName);
-        string tmpPath = destPath + ".part";
+        string tmpPath = destPath + "." + (job.AttemptId ?? "legacy") + ".part";
 
         await ReportProgressAsync(job.Id, progress: 0, state: "DOWNLOADING", token: token);
 
@@ -495,7 +511,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         try
         {
             await DownloadWithRetryAsync(job, url, tmpPath, ProgressCallback, token);
-            string shaLocal = ArcEnCielLinkHashesCompute(tmpPath);
+            string shaLocal = ArcEnCielLinkHashesCompute(tmpPath, token);
             if (!string.IsNullOrWhiteSpace(job.Sha256) && !string.Equals(job.Sha256, shaLocal, StringComparison.OrdinalIgnoreCase))
             {
                 File.Delete(tmpPath);
@@ -503,6 +519,8 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 return;
             }
 
+            if (_attempt is not null) await _attempt.RenewAsync();
+            token.ThrowIfCancellationRequested();
             File.Move(tmpPath, destPath);
 
             if (job.Meta is not null)
@@ -520,6 +538,11 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             List<string> hashes = _hashes.UpdateCachedHash(destPath, shaLocal);
             await SyncInventoryAsync(hashes, token);
             await ReportProgressAsync(job.Id, progress: 100, state: "DONE", token: token);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            if (File.Exists(tmpPath)) File.Delete(tmpPath);
+            throw;
         }
         catch (Exception ex)
         {
@@ -603,6 +626,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
 
             await output.WriteAsync(buffer.AsMemory(0, bytes), token);
             read += bytes;
+            if (_attempt is not null) _attempt.BytesDownloaded = read;
             if (total > 0)
             {
                 progress(read / (double)total);
@@ -615,13 +639,16 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         Dictionary<string, object?> payload = new()
         {
             ["type"] = "progress",
-            ["jobId"] = jobId
+            ["jobId"] = jobId,
+            ["attemptId"] = _attempt?.AttemptId,
+            ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId,
+            ["bytesDownloaded"] = _attempt?.BytesDownloaded ?? 0
         };
         if (progress.HasValue) payload["progress"] = progress.Value;
         if (!string.IsNullOrWhiteSpace(state)) payload["state"] = state;
         if (!string.IsNullOrWhiteSpace(message)) payload["message"] = message;
 
-        if (await SendMessageAsync(payload, token))
+        if (!(jobId == _attempt?.JobId && _attempt?.AttemptId is not null && state is "DONE" or "ERROR") && await SendMessageAsync(payload, token))
         {
             if (state == "DONE")
             {
@@ -631,7 +658,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         }
 
         string url = $"{_baseUrl}/queue/{jobId}/progress";
-        JObject body = new();
+        JObject body = _attempt?.Fields() ?? new();
         if (progress.HasValue) body["progress"] = progress.Value;
         if (!string.IsNullOrWhiteSpace(state)) body["state"] = state;
         if (!string.IsNullOrWhiteSpace(message)) body["message"] = message;
@@ -643,7 +670,10 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         ApplyAuthHeaders(request);
         try
         {
-            await _http.SendAsync(request, token);
+            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            using HttpResponseMessage response = await _http.SendAsync(request, timeout.Token);
+            response.EnsureSuccessStatusCode();
         }
         catch (Exception ex)
         {
@@ -696,7 +726,10 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         ApplyAuthHeaders(request);
         try
         {
-            await _http.SendAsync(request, token);
+            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            using HttpResponseMessage response = await _http.SendAsync(request, timeout.Token);
+            response.EnsureSuccessStatusCode();
         }
         catch (Exception ex)
         {
@@ -713,7 +746,8 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             ["client"] = ArcEnCielLinkProtocol.ClientId,
             ["clientVersion"] = ArcEnCielLinkProtocol.Version,
             ["protocolVersion"] = ArcEnCielLinkProtocol.ProtocolVersion,
-            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability }
+            ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId,
+            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability, "job_lease_v1" }
         };
         await SendMessageAsync(payload, token);
     }
@@ -783,6 +817,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         job = new LinkJobPayload
         {
             Id = id,
+            AttemptId = data.Value<string>("attemptId"),
             TargetPath = targetPath,
             DownloadUrl = url,
             DownloadGrant = data.Value<string>("downloadGrant"),
@@ -818,8 +853,9 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     {
         socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
         socket.Options.SetRequestHeader("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
+        socket.Options.SetRequestHeader("x-arcenciel-link-runtime", ArcEnCielLinkAttempt.RuntimeId);
         socket.Options.SetRequestHeader("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
-        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability);
+        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1");
 
         if (!string.IsNullOrWhiteSpace(_linkKey))
         {
@@ -971,8 +1007,9 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private static void ApplyProtocolHeaders(HttpRequestMessage request)
     {
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
+        request.Headers.TryAddWithoutValidation("x-arcenciel-link-runtime", ArcEnCielLinkAttempt.RuntimeId);
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
-        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability);
+        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1");
     }
 
     private string ResolveDownloadUrl(string urlRaw)
@@ -1037,11 +1074,18 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         }
     }
 
-    private static string ArcEnCielLinkHashesCompute(string path)
+    private static string ArcEnCielLinkHashesCompute(string path, CancellationToken token)
     {
         using FileStream stream = File.OpenRead(path);
-        using var sha = System.Security.Cryptography.SHA256.Create();
-        byte[] hash = sha.ComputeHash(stream);
+        using var sha = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+        byte[] buffer = new byte[1024 * 1024];
+        int read;
+        while ((read = stream.Read(buffer)) > 0)
+        {
+            token.ThrowIfCancellationRequested();
+            sha.AppendData(buffer, 0, read);
+        }
+        byte[] hash = sha.GetHashAndReset();
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
@@ -1053,6 +1097,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private sealed class LinkJobPayload
     {
         public int Id { get; init; }
+        public string? AttemptId { get; init; }
         public string TargetPath { get; init; } = "";
         public string? DownloadUrl { get; init; }
         public string? DownloadGrant { get; init; }
