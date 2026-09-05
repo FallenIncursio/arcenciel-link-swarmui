@@ -19,6 +19,14 @@ internal static class SetupCheckTests
             var success = await ArcEnCielLinkSetupCheck.Probe(root, _ => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(data) }), CancellationToken.None);
             Assert(success.Value<bool>("ok") && success.Value<bool>("cleaned"), "Setup did not verify/clean");
             Assert(success.Value<string>("sha256") == ArcEnCielLinkSetupCheck.Sha256 && success.Value<int>("bytes") == 4096, "Invalid proof");
+            success["type"] = "setup_check_result";
+            using (var message = System.Text.Json.JsonDocument.Parse(ArcEnCielLinkProtocol.SerializePayload(success)))
+            {
+                Assert(message.RootElement.GetProperty("type").GetString() == "setup_check_result", "Protocol discriminator is not a string");
+                Assert(message.RootElement.GetProperty("ok").GetBoolean() && message.RootElement.GetProperty("bytes").GetInt32() == 4096, "Probe fields lost their JSON types");
+            }
+            using (var legacy = System.Text.Json.JsonDocument.Parse(ArcEnCielLinkProtocol.SerializePayload(new { type = "poll" })))
+                Assert(legacy.RootElement.GetProperty("type").GetString() == "poll", "Legacy message serialization changed");
             Assert(success.Value<string>("target") == root && await File.ReadAllTextAsync(existing) == "keep", "Wrong folder or existing file changed");
             Assert(Directory.GetFiles(root).Length == 1, "Test file remains");
             foreach (byte[] invalid in new[] { data[..10], new byte[4096], data.Concat(new byte[1]).ToArray() })

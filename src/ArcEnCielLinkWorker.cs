@@ -816,7 +816,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             return false;
         }
 
-        string json = JsonSerializer.Serialize(payload);
+        string json = ArcEnCielLinkProtocol.SerializePayload(payload);
         byte[] bytes = Encoding.UTF8.GetBytes(json);
         await _sendLock.WaitAsync(token);
         try
