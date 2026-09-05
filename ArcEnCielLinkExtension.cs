@@ -65,6 +65,14 @@ internal static class ArcEnCielLinkEndpoints
             return Results.Text("ok", "text/plain");
         });
 
+        app.MapGet("/arcenciel-link/status", (HttpContext context) =>
+        {
+            if (!ArcEnCielLinkCors.TryGetAllowedOrigin(context, out string? origin)) return Results.StatusCode(403);
+            ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Text(new Newtonsoft.Json.Linq.JObject { ["version"] = ArcEnCielLinkProtocol.Version, ["running"] = ArcEnCielLinkRuntime.Worker.IsWorkerRunning, ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId, ["tool"] = ArcEnCielLinkRuntime.Worker.DeviceToolStatus }.ToString(), "application/json");
+        });
+
         app.MapGet("/arcenciel-link/settings", (HttpContext context) =>
         {
             if (!TryAuthorizeSettings(context, requireEdit: false, out _, out string? origin, out IResult? failure))
@@ -76,6 +84,8 @@ internal static class ArcEnCielLinkEndpoints
             ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
             return Results.Json(new
             {
+                version = ArcEnCielLinkProtocol.Version,
+                deviceTool = ArcEnCielLinkRuntime.Worker.DeviceToolStatus?.Value<string>("state"),
                 baseUrl = config.BaseUrl,
                 linkKeySet = !string.IsNullOrWhiteSpace(config.LinkKey),
                 enabled = config.Enabled,

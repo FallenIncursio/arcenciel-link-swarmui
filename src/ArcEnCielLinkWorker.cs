@@ -46,6 +46,8 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private DateTimeOffset? _suspendUntil;
 
     private int _setupCheckRunning;
+    private readonly ArcEnCielLinkDeviceTools _deviceTools = new();
+    public JObject? DeviceToolStatus => _deviceTools.Status;
     private string _baseUrl;
     private string _linkKey;
     private int _minFreeMb;
@@ -320,6 +322,26 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             return;
         }
 
+        if (command == "cancel_device_tool") { _deviceTools.Cancel(msg, ArcEnCielLinkAttempt.RuntimeId); return; }
+        if (command == "device_tool")
+        {
+            ArcEnCielLinkConfig config = new() { BaseUrl = _baseUrl, LinkKey = _linkKey, SaveHtmlPreview = _saveHtmlPreview };
+            async Task<JObject> Post(string suffix, JObject body, CancellationToken cancellation)
+            {
+                using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+                timeout.CancelAfter(TimeSpan.FromSeconds(12));
+                using HttpRequestMessage request = new(HttpMethod.Post, config.BaseUrl.TrimEnd('/') + suffix) { Content = new StringContent(body.ToString(Newtonsoft.Json.Formatting.None), Encoding.UTF8, "application/json") };
+                ApplyAuthHeaders(request, config);
+                using HttpResponseMessage response = await _privateHttp.SendAsync(request, timeout.Token);
+                if ((int)response.StatusCode is 401 or 403 or 409) throw new OperationCanceledException();
+                response.EnsureSuccessStatusCode();
+                return JObject.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
+            }
+            void Synced(List<string> hashes) { lock (_knownHashesLock) { _knownHashes.Clear(); _knownHashes.UnionWith(hashes); } }
+            _deviceTools.Start(msg, ArcEnCielLinkAttempt.RuntimeId, ArcEnCielLinkPaths.GetModelRoots, Post,
+                (meta, hash, path, cancellation) => ArcEnCielLinkSidecars.RepairMissingAsync(this, config, _http, meta, hash, path, cancellation), Synced, _attempt is not null);
+            return;
+        }
         if (command == "setup_check")
         {
             string? target = ArcEnCielLinkSetupCheck.Target(msg.Value<string>("kind"));
@@ -479,7 +501,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             try
             {
                 List<string> hashes = _hashes.ListModelHashes();
-                await SyncInventoryAsync(hashes, token);
+                await SyncInventoryAsync(hashes, token, force: true);
             }
             catch (Exception ex)
             {
@@ -570,6 +592,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             token.ThrowIfCancellationRequested();
             File.Move(tmpPath, destPath);
 
+            bool sidecarWarning = false;
             if (job.Meta is not null)
             {
                 ArcEnCielLinkConfig snapshot = new()
@@ -579,12 +602,14 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                     SaveHtmlPreview = _saveHtmlPreview,
                 };
 
-                await ArcEnCielLinkSidecars.WriteSidecarsAsync(this, snapshot, _http, job.Meta, shaLocal, destPath, token);
+                try { sidecarWarning = await ArcEnCielLinkSidecars.WriteSidecarsAsync(this, snapshot, _http, job.Meta, shaLocal, destPath, token); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+                catch { sidecarWarning = true; }
             }
 
             List<string> hashes = _hashes.UpdateCachedHash(destPath, shaLocal);
             await SyncInventoryAsync(hashes, token);
-            await ReportProgressAsync(job.Id, progress: 100, state: "DONE", token: token);
+            await ReportProgressAsync(job.Id, progress: 100, state: "DONE", message: sidecarWarning ? "SIDECAR_WARNING: Model saved. Repair missing metadata in Device tools." : null, token: token);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -728,7 +753,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         }
     }
 
-    private async Task SyncInventoryAsync(List<string> hashes, CancellationToken token)
+    private async Task SyncInventoryAsync(List<string> hashes, CancellationToken token, bool force = false)
     {
         bool changed;
         lock (_knownHashesLock)
@@ -748,7 +773,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             }
         }
 
-        if (!changed)
+        if (!changed && !force)
         {
             return;
         }
@@ -756,7 +781,8 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         Dictionary<string, object> payload = new()
         {
             ["type"] = "inventory",
-            ["hashes"] = hashes
+            ["hashes"] = hashes,
+            ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId
         };
 
         if (await SendMessageAsync(payload, token))
@@ -765,7 +791,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         }
 
         string url = $"{_baseUrl}/inventory";
-        JObject body = new() { ["hashes"] = JArray.FromObject(hashes) };
+        JObject body = new() { ["hashes"] = JArray.FromObject(hashes), ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId };
         using HttpRequestMessage request = new(HttpMethod.Post, url)
         {
             Content = new StringContent(body.ToString(), Encoding.UTF8, "application/json")
@@ -794,7 +820,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             ["clientVersion"] = ArcEnCielLinkProtocol.Version,
             ["protocolVersion"] = ArcEnCielLinkProtocol.ProtocolVersion,
             ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId,
-            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability, "job_lease_v1", "setup_check_v1" }
+            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability, "job_lease_v1", "setup_check_v1", "device_tools_v1" }
         };
         await SendMessageAsync(payload, token);
     }
@@ -902,7 +928,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         socket.Options.SetRequestHeader("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
         socket.Options.SetRequestHeader("x-arcenciel-link-runtime", ArcEnCielLinkAttempt.RuntimeId);
         socket.Options.SetRequestHeader("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
-        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1");
+        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1,device_tools_v1");
 
         if (!string.IsNullOrWhiteSpace(_linkKey))
         {
@@ -1056,7 +1082,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-runtime", ArcEnCielLinkAttempt.RuntimeId);
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
-        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1");
+        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1,device_tools_v1");
     }
 
     private string ResolveDownloadUrl(string urlRaw)

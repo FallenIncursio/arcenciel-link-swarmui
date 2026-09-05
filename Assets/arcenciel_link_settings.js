@@ -26,6 +26,7 @@ class ArcEnCielLinkSettingsUI {
                     <button class="basic-button translate" id="arcenciel_link_settings_reload">Reload</button>
                     <span id="arcenciel_link_settings_status" style="margin-left: 0.75rem;"></span>
                 </div>
+                <a href="https://arcenciel.io/link" target="_blank" rel="noopener noreferrer">Open device tools and your library</a>
                 <div id="arcenciel_link_settings_meta" class="translate" style="margin-top: 0.5rem;"></div>
             </div>`;
     confirmer.parentNode.insertBefore(card, confirmer);
@@ -184,6 +185,8 @@ class ArcEnCielLinkSettingsUI {
       : "lk_...";
 
     const parts = [];
+    parts.push(`Link ${data.version || "unknown"}`);
+    if (data.deviceTool) parts.push(`Last device tool: ${data.deviceTool}`);
     parts.push(`Worker: ${data.enabled ? "Enabled" : "Disabled"}`);
     parts.push(`Link Key: ${data.linkKeySet ? "Set" : "Missing"}`);
     this.setMeta(parts.join(" | "));

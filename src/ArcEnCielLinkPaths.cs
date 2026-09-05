@@ -115,7 +115,7 @@ internal static class ArcEnCielLinkPaths
         T2IModelHandler handler = GetHandler(kind);
         HashSet<string> results = new(StringComparer.OrdinalIgnoreCase);
 
-        foreach (string root in handler.FolderPaths ?? [])
+        foreach (string root in new[] { handler.DownloadFolderPath })
         {
             if (!Directory.Exists(root))
             {

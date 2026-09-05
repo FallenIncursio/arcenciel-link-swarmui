@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <Compile Include="../src/ArcEnCielLinkDeviceTools.cs" Link="ArcEnCielLinkDeviceTools.cs" />
     <Compile Include="../src/ArcEnCielLinkProtocol.cs" Link="ArcEnCielLinkProtocol.cs" />
     <Compile Include="../src/ArcEnCielLinkSetupCheck.cs" Link="ArcEnCielLinkSetupCheck.cs" />
     <Compile Include="../src/ArcEnCielLinkAttempt.cs" Link="ArcEnCielLinkAttempt.cs" />
