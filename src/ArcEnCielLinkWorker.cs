@@ -326,7 +326,15 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 return;
             }
 
-            ArcEnCielLinkRuntime.ApplyWorkerState(enable, linkKey);
+            try
+            {
+                ArcEnCielLinkRuntime.ApplyWorkerState(enable, linkKey);
+            }
+            catch (ArgumentException ex)
+            {
+                await SendMessageAsync(new { type = "control_ack", command, requestId, ok = false, message = ex.Message }, token);
+                return;
+            }
 
             await SendMessageAsync(
                 new

@@ -3,5 +3,8 @@
     <AssemblyName>ArcEnCielLinkExtension</AssemblyName>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
   <Import Project="../../SwarmUI.extension.props" />
 </Project>

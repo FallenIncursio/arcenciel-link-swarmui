@@ -22,6 +22,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "8.0.x"
+      - name: Verify runtime configuration contract
+        run: dotnet run --project extension/tests/RuntimeConfigTests.csproj --configuration Release
       - name: Build SwarmUI reference assembly
         working-directory: swarm
         run: dotnet build src/SwarmUI.csproj --configuration Release --output src/bin/live_release

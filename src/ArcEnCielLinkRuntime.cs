@@ -43,15 +43,18 @@ internal static class ArcEnCielLinkRuntime
     {
         lock (SyncRoot)
         {
-            Config = ArcEnCielLinkConfig.Load();
+            ArcEnCielLinkConfig candidate = ArcEnCielLinkConfig.Load();
+
+            candidate.ValidateWorkerChange(enable, linkKey);
 
             if (linkKey is not null)
             {
-                Config.LinkKey = linkKey;
+                candidate.LinkKey = linkKey;
             }
 
-            Config.Enabled = enable;
-            Config.Save();
+            candidate.Enabled = enable;
+            candidate.Save();
+            Config = candidate;
 
             Worker.UpdateConfig(Config);
             Worker.SetWorkerEnabled(enable);
@@ -62,12 +65,18 @@ internal static class ArcEnCielLinkRuntime
     {
         lock (SyncRoot)
         {
-            Config = ArcEnCielLinkConfig.Load();
-            update(Config);
-            Config.Save();
+            ArcEnCielLinkConfig candidate = ArcEnCielLinkConfig.Load();
+            candidate.Enabled = Worker.IsWorkerRunning;
+            update(candidate);
+            candidate.ValidateWorkerChange(candidate.Enabled, candidate.LinkKey);
+            string? managedUrl = Environment.GetEnvironmentVariable("ARCENCIEL_LINK_URL");
+            if (managedUrl is not null && candidate.BaseUrl != managedUrl.Trim().TrimEnd('/'))
+                throw new ArgumentException("ARCENCIEL_LINK_URL is managed by the runtime environment; update it and restart");
+            candidate.Save();
+            Config = candidate;
 
             Worker.UpdateConfig(Config);
-            Worker.SetWorkerEnabled(Config.Enabled);
+            Worker.SetWorkerEnabled(candidate.Enabled);
         }
     }
 

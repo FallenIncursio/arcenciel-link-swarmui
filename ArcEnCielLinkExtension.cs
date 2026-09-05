@@ -144,48 +144,56 @@ internal static class ArcEnCielLinkEndpoints
                 return Results.Json(new { error = "Backoff base must be >= 1" }, statusCode: 400);
             }
 
-            ArcEnCielLinkRuntime.ApplyConfig(config =>
+            try
             {
-                if (payload.BaseUrl is not null && baseUrl is not null)
+                ArcEnCielLinkRuntime.ApplyConfig(config =>
                 {
-                    config.BaseUrl = baseUrl;
-                }
+                    if (payload.BaseUrl is not null && baseUrl is not null)
+                    {
+                        config.BaseUrl = baseUrl;
+                    }
 
-                if (payload.LinkKey is not null)
-                {
-                    config.LinkKey = linkKey ?? "";
-                }
+                    if (payload.LinkKey is not null)
+                    {
+                        config.LinkKey = linkKey ?? "";
+                    }
 
-                if (payload.Enabled.HasValue)
-                {
-                    config.Enabled = payload.Enabled.Value;
-                }
+                    if (payload.Enabled.HasValue)
+                    {
+                        config.Enabled = payload.Enabled.Value;
+                    }
 
-                if (payload.MinFreeMb.HasValue)
-                {
-                    config.MinFreeMb = payload.MinFreeMb.Value;
-                }
+                    if (payload.MinFreeMb.HasValue)
+                    {
+                        config.MinFreeMb = payload.MinFreeMb.Value;
+                    }
 
-                if (payload.MaxRetries.HasValue)
-                {
-                    config.MaxRetries = payload.MaxRetries.Value;
-                }
+                    if (payload.MaxRetries.HasValue)
+                    {
+                        config.MaxRetries = payload.MaxRetries.Value;
+                    }
 
-                if (payload.BackoffBase.HasValue)
-                {
-                    config.BackoffBase = payload.BackoffBase.Value;
-                }
+                    if (payload.BackoffBase.HasValue)
+                    {
+                        config.BackoffBase = payload.BackoffBase.Value;
+                    }
 
-                if (payload.SaveHtmlPreview.HasValue)
-                {
-                    config.SaveHtmlPreview = payload.SaveHtmlPreview.Value;
-                }
+                    if (payload.SaveHtmlPreview.HasValue)
+                    {
+                        config.SaveHtmlPreview = payload.SaveHtmlPreview.Value;
+                    }
 
-                if (payload.AllowPrivateOrigins.HasValue)
-                {
-                    config.AllowPrivateOrigins = payload.AllowPrivateOrigins.Value;
-                }
-            });
+                    if (payload.AllowPrivateOrigins.HasValue)
+                    {
+                        config.AllowPrivateOrigins = payload.AllowPrivateOrigins.Value;
+                    }
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
+                return Results.Json(new { error = ex.Message }, statusCode: 400);
+            }
 
             ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
             return Results.Json(new { ok = true, workerOnline = ArcEnCielLinkRuntime.Worker.IsWorkerRunning });
@@ -222,7 +230,15 @@ internal static class ArcEnCielLinkEndpoints
                 }
             }
 
-            ArcEnCielLinkRuntime.ApplyWorkerState(payload.Enable.Value, linkKey);
+            try
+            {
+                ArcEnCielLinkRuntime.ApplyWorkerState(payload.Enable.Value, linkKey);
+            }
+            catch (ArgumentException ex)
+            {
+                ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
+                return Results.Json(new { error = ex.Message }, statusCode: 400);
+            }
             bool workerOnline = ArcEnCielLinkRuntime.Worker.IsWorkerRunning;
 
             ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
