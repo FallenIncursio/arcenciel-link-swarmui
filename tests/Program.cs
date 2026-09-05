@@ -84,6 +84,7 @@ namespace ContractTests
                 File.WriteAllText(configPath, JsonSerializer.Serialize(new ArcEnCielLinkConfig { Enabled = true }));
                 ArcEnCielLinkConfig.Load().ValidateWorkerChange(true, desktopKey);
                 AttemptTests.Run().GetAwaiter().GetResult();
+                SetupCheckTests.Run().GetAwaiter().GetResult();
                 Console.WriteLine($"PASS: {count} shared startup cases plus persistence, restart, managed-key and missing-key checks");
             }
             finally { ClearEnvironment(); Directory.Delete(root, true); }

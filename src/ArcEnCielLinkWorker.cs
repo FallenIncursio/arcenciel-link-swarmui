@@ -45,6 +45,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private int _reconnectAttempts;
     private DateTimeOffset? _suspendUntil;
 
+    private int _setupCheckRunning;
     private string _baseUrl;
     private string _linkKey;
     private int _minFreeMb;
@@ -306,6 +307,39 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             return;
         }
 
+        if (command == "setup_check")
+        {
+            string? target = ArcEnCielLinkSetupCheck.Target(msg.Value<string>("kind"));
+            if (!Guid.TryParse(requestId, out _) || target is null || msg.Value<string>("runtimeId") != ArcEnCielLinkAttempt.RuntimeId) return;
+            if (_attempt is not null || Interlocked.CompareExchange(ref _setupCheckRunning, 1, 0) != 0)
+            {
+                await SendMessageAsync(new { type = "setup_check_result", requestId, runtimeId = ArcEnCielLinkAttempt.RuntimeId, ok = false, code = "BUSY" }, token);
+                return;
+            }
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    JObject result;
+                    try
+                    {
+                        string root = ArcEnCielLinkPaths.ResolveTargetPath(target);
+                        result = await ArcEnCielLinkSetupCheck.Probe(root, async cancellation =>
+                        {
+                            using HttpRequestMessage request = new(HttpMethod.Get, $"{_baseUrl}/setup/file/{requestId}");
+                            ApplyAuthHeaders(request);
+                            return await _privateHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellation);
+                        }, token);
+                    }
+                    catch { result = new JObject { ["ok"] = false, ["code"] = "TARGET_UNAVAILABLE" }; }
+                    result["type"] = "setup_check_result"; result["requestId"] = requestId;
+                    result["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId;
+                    await SendMessageAsync(result, token);
+                }
+                finally { Interlocked.Exchange(ref _setupCheckRunning, 0); }
+            }, CancellationToken.None);
+            return;
+        }
         if (command == "cancel_job")
         {
             bool cancelled = _attempt?.Cancel(msg.Value<int?>("jobId") ?? 0, msg.Value<string>("attemptId"), msg.Value<string>("runtimeId")) ?? false;
@@ -747,7 +781,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             ["clientVersion"] = ArcEnCielLinkProtocol.Version,
             ["protocolVersion"] = ArcEnCielLinkProtocol.ProtocolVersion,
             ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId,
-            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability, "job_lease_v1" }
+            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability, "job_lease_v1", "setup_check_v1" }
         };
         await SendMessageAsync(payload, token);
     }
@@ -855,7 +889,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         socket.Options.SetRequestHeader("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
         socket.Options.SetRequestHeader("x-arcenciel-link-runtime", ArcEnCielLinkAttempt.RuntimeId);
         socket.Options.SetRequestHeader("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
-        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1");
+        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1");
 
         if (!string.IsNullOrWhiteSpace(_linkKey))
         {
@@ -1009,7 +1043,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-runtime", ArcEnCielLinkAttempt.RuntimeId);
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
-        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1");
+        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1");
     }
 
     private string ResolveDownloadUrl(string urlRaw)

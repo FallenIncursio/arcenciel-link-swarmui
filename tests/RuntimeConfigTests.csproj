@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <Compile Include="../src/ArcEnCielLinkSetupCheck.cs" Link="ArcEnCielLinkSetupCheck.cs" />
     <Compile Include="../src/ArcEnCielLinkAttempt.cs" Link="ArcEnCielLinkAttempt.cs" />
     <Compile Include="../src/ArcEnCielLinkConfig.cs" Link="ArcEnCielLinkConfig.cs" />
     <None Update="fixtures/runtime-config-v1.json" CopyToOutputDirectory="PreserveNewest" />
