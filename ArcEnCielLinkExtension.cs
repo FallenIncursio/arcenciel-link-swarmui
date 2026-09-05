@@ -70,7 +70,7 @@ internal static class ArcEnCielLinkEndpoints
             if (!ArcEnCielLinkCors.TryGetAllowedOrigin(context, out string? origin)) return Results.StatusCode(403);
             ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
             context.Response.Headers.CacheControl = "no-store";
-            return Results.Text(new Newtonsoft.Json.Linq.JObject { ["version"] = ArcEnCielLinkProtocol.Version, ["running"] = ArcEnCielLinkRuntime.Worker.IsWorkerRunning, ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId, ["tool"] = ArcEnCielLinkRuntime.Worker.DeviceToolStatus }.ToString(), "application/json");
+            return Results.Text(new Newtonsoft.Json.Linq.JObject { ["version"] = ArcEnCielLinkProtocol.Version, ["running"] = ArcEnCielLinkRuntime.Worker.IsWorkerRunning, ["connected"] = ArcEnCielLinkRuntime.Worker.IsConnected, ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId, ["tool"] = ArcEnCielLinkRuntime.Worker.DeviceToolStatus }.ToString(), "application/json");
         });
 
         app.MapGet("/arcenciel-link/settings", (HttpContext context) =>
@@ -94,7 +94,7 @@ internal static class ArcEnCielLinkEndpoints
                 backoffBase = config.BackoffBase,
                 saveHtmlPreview = config.SaveHtmlPreview,
                 allowPrivateOrigins = config.AllowPrivateOrigins,
-                workerOnline = ArcEnCielLinkRuntime.Worker.IsWorkerRunning
+                workerOnline = ArcEnCielLinkRuntime.Worker.IsConnected && ArcEnCielLinkRuntime.Worker.IsWorkerRunning
             });
         });
 
@@ -206,7 +206,7 @@ internal static class ArcEnCielLinkEndpoints
             }
 
             ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
-            return Results.Json(new { ok = true, workerOnline = ArcEnCielLinkRuntime.Worker.IsWorkerRunning });
+            return Results.Json(new { ok = true, workerOnline = ArcEnCielLinkRuntime.Worker.IsConnected && ArcEnCielLinkRuntime.Worker.IsWorkerRunning });
         });
 
         app.MapPost("/arcenciel-link/toggle_link", async (HttpContext context) =>
@@ -249,7 +249,7 @@ internal static class ArcEnCielLinkEndpoints
                 ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
                 return Results.Json(new { error = ex.Message }, statusCode: 400);
             }
-            bool workerOnline = ArcEnCielLinkRuntime.Worker.IsWorkerRunning;
+            bool workerOnline = ArcEnCielLinkRuntime.Worker.IsConnected && ArcEnCielLinkRuntime.Worker.IsWorkerRunning;
 
             ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
             return Results.Json(new { ok = true, workerOnline });

@@ -2,7 +2,7 @@ namespace ArcEnCiel.Link.Swarm;
 
 internal static class ArcEnCielLinkProtocol
 {
-    public const string Version = "2.4.0";
+    public const string Version = "2.4.1";
     public static string SerializePayload(object payload) => payload is Newtonsoft.Json.Linq.JToken token
         ? token.ToString(Newtonsoft.Json.Formatting.None)
         : System.Text.Json.JsonSerializer.Serialize(payload);

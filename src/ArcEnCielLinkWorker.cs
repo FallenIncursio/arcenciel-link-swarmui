@@ -48,6 +48,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private int _setupCheckRunning;
     private readonly ArcEnCielLinkDeviceTools _deviceTools = new();
     public JObject? DeviceToolStatus => _deviceTools.Status;
+    public bool IsConnected => _socket?.State == WebSocketState.Open;
     private string _baseUrl;
     private string _linkKey;
     private int _minFreeMb;
