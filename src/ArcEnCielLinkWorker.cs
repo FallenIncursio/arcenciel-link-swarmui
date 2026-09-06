@@ -530,7 +530,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 {
                     var profile = new {
                         schemaVersion = 1, host = "swarmui",
-                        fields = new[] { "prompt", "negativePrompt", "seed", "steps", "cfg", "width", "height", "sampler", "scheduler" },
+                        fields = new[] { "prompt", "negativePrompt", "seed", "steps", "cfg", "width", "height", "sampler", "scheduler", "checkpoint", "loras", "vae" },
                         samplers = SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.Samplers.Select(v => v.Split("///")[0]).ToArray(),
                         schedulers = SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.Schedulers.Select(v => v.Split("///")[0]).ToArray(),
                         maxSeed = "9007199254740991", templates = new[] { "basic_checkpoint_v1" }

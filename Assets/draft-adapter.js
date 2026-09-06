@@ -9,13 +9,40 @@
     height: "height",
     sampler: "sampler",
     scheduler: "scheduler",
+    checkpoint: "model",
+    vae: "vae",
+    loras: "loras",
+    loraWeights: "loraweights",
   };
   const input = (key) => document.getElementById(`input_${ids[key]}`);
   const param = (key) => gen_param_types.find((p) => p.id === ids[key]);
+  function loraValues() {
+    const element = input("loras");
+    const names =
+      element.tagName === "SELECT"
+        ? [...element.selectedOptions].map((o) => o.value)
+        : element.value.split(",").filter(Boolean);
+    const weights =
+      document.getElementById("input_loraweights")?.value.split(",") || [];
+    return JSON.stringify(
+      names.map((name, i) => ({
+        name,
+        strength: weights[i]?.trim() ? Number(weights[i]) : 1,
+      })),
+    );
+  }
   async function read(keys, requireEnabled = true) {
     return Object.fromEntries(
       keys.map((key) => {
         const e = input(key);
+        if (key === "loras" && e) {
+          for (const name of ["loras", "loraweights"]) {
+            const toggle = document.getElementById(`input_${name}_toggle`);
+            if (requireEnabled && toggle && !toggle.checked)
+              throw new Error("The native LoRA settings are still disabled.");
+          }
+          return [key, loraValues()];
+        }
         if (!e) throw new Error(`This Swarm backend does not expose ${key}.`);
         const toggle = document.getElementById(`input_${ids[key]}_toggle`);
         if (requireEnabled && toggle && !toggle.checked)
@@ -36,7 +63,46 @@
         e = input(key);
       if (!type || !e)
         throw new Error(`The ${key} setting changed. Refresh your backend.`);
-      setDirectParamValue(type, value, e, false, true);
+      if (key === "loras") {
+        const values = JSON.parse(value),
+          weights = document.getElementById("input_loraweights"),
+          weightType = gen_param_types.find((p) => p.id === "loraweights");
+        if (!weights || !weightType)
+          throw new Error("Native LoRA weights are unavailable.");
+        if (
+          values.some(
+            (v) =>
+              v.clipStrength !== undefined && v.clipStrength !== v.strength,
+          )
+        )
+          throw new Error(
+            "Separate CLIP LoRA strengths need a workflow mapping.",
+          );
+        setDirectParamValue(
+          type,
+          values.map((v) => v.name),
+          e,
+          false,
+          true,
+        );
+        setDirectParamValue(
+          weightType,
+          values.map((v) => v.strength).join(","),
+          weights,
+          false,
+          true,
+        );
+      } else setDirectParamValue(type, value, e, false, true);
+      if (key === "loras" && options.enable !== false) {
+        const weightsToggle = document.getElementById(
+          "input_loraweights_toggle",
+        );
+        if (weightsToggle) {
+          weightsToggle.checked = true;
+          doToggleEnable("input_loraweights");
+          triggerChangeFor(weightsToggle);
+        }
+      }
       const toggle = document.getElementById(`input_${ids[key]}_toggle`);
       if (toggle && options.enable !== false) {
         toggle.checked = true;
@@ -92,6 +158,25 @@
       for (const [key, value] of Object.entries(fields)) {
         const e = input(key),
           type = param(key);
+        if (key === "loras") {
+          const values = JSON.parse(value);
+          const available =
+            typeof coreModelMap !== "undefined" ? coreModelMap.LoRA || [] : [];
+          checks[key] = {
+            before: e ? loraValues() : undefined,
+            reason:
+              !e ||
+              values.some(
+                (v) =>
+                  !available.includes(v.name) ||
+                  (v.clipStrength !== undefined &&
+                    v.clipStrength !== v.strength),
+              )
+                ? "A LoRA name or separate CLIP strength is unavailable in this backend."
+                : undefined,
+          };
+          continue;
+        }
         let reason =
           !e || !type
             ? "The active backend does not expose this field."
