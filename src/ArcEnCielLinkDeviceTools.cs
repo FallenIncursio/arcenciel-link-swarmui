@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -14,7 +15,8 @@ internal sealed class ArcEnCielLinkDeviceTools
     private JObject? _state;
     private DateTimeOffset _lastAck;
     private readonly SemaphoreSlim _reportGate = new(1, 1);
-    private readonly Dictionary<string, (long Mtime, long Size, string Hash)> _cache = new();
+    private readonly ConcurrentDictionary<string, (long Mtime, long Size, string Hash)> _cache = new();
+    public List<(string Path, string Hash, long Mtime, long Size)> CachedFiles() => _cache.Select(p => (p.Key, p.Value.Hash, p.Value.Mtime, p.Value.Size)).ToList();
     public JObject? Status { get { lock (_gate) return _state is null ? null : (JObject)_state.DeepClone(); } }
     private bool _running;
     private bool _finishing;
@@ -136,7 +138,7 @@ internal sealed class ArcEnCielLinkDeviceTools
             }
             result.Add((digest, path)); Increment("processed");
         }
-        foreach (string old in _cache.Keys.Where(k => !files.Contains(k)).ToArray()) _cache.Remove(old);
+        foreach (string old in _cache.Keys.Where(k => !files.Contains(k)).ToArray()) _cache.TryRemove(old, out _);
         return result;
     }
 }

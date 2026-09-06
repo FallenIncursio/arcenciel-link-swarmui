@@ -19,6 +19,8 @@ public class ArcEnCielLinkExtension : Extension
         Description = "ArcEnCiel Link worker extension for SwarmUI.";
         License = "MIT";
         ScriptFiles.Add("Assets/arcenciel_link_settings.js");
+        ScriptFiles.Add("Assets/draft-inbox.js");
+        ScriptFiles.Add("Assets/draft-adapter.js");
         ArcEnCielLinkRuntime.Initialize();
     }
 
@@ -70,7 +72,20 @@ internal static class ArcEnCielLinkEndpoints
             if (!ArcEnCielLinkCors.TryGetAllowedOrigin(context, out string? origin)) return Results.StatusCode(403);
             ArcEnCielLinkCors.ApplyCorsHeaders(context.Response, origin);
             context.Response.Headers.CacheControl = "no-store";
-            return Results.Text(new Newtonsoft.Json.Linq.JObject { ["version"] = ArcEnCielLinkProtocol.Version, ["running"] = ArcEnCielLinkRuntime.Worker.IsWorkerRunning, ["connected"] = ArcEnCielLinkRuntime.Worker.IsConnected, ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId, ["tool"] = ArcEnCielLinkRuntime.Worker.DeviceToolStatus }.ToString(), "application/json");
+            return Results.Text(new Newtonsoft.Json.Linq.JObject { ["version"] = ArcEnCielLinkProtocol.Version, ["running"] = ArcEnCielLinkRuntime.Worker.IsWorkerRunning, ["connected"] = ArcEnCielLinkRuntime.Worker.IsConnected, ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId, ["recipeStatus"] = ArcEnCielLinkRuntime.Worker.RecipeStatus, ["tool"] = ArcEnCielLinkRuntime.Worker.DeviceToolStatus }.ToString(), "application/json");
+        });
+
+        app.MapPost("/arcenciel-link/editor/{action}", async (HttpContext context, string action) =>
+        {
+            if (!TryAuthorizeSettings(context, requireEdit: true, out _, out _, out IResult? failure)) return failure!;
+            if (context.Request.Headers["X-AEC-Link-Editor"] != "1" || context.Request.Headers["Sec-Fetch-Site"] != "same-origin") return Results.StatusCode(403);
+            using var reader = new System.IO.StreamReader(context.Request.Body);
+            char[] buffer = new char[100001];
+            int length = await reader.ReadBlockAsync(buffer, 0, buffer.Length);
+            if (length > 100000) return Results.StatusCode(413);
+            var result = await ArcEnCielLinkRuntime.Worker.DraftRequestAsync(action, new string(buffer, 0, length), context.RequestAborted);
+            context.Response.Headers.CacheControl = "no-store";
+            return Results.Text(result.Body, "application/json", statusCode: result.Status);
         });
 
         app.MapGet("/arcenciel-link/settings", (HttpContext context) =>

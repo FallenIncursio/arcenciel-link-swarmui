@@ -48,6 +48,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
     private int _setupCheckRunning;
     private readonly ArcEnCielLinkDeviceTools _deviceTools = new();
     public JObject? DeviceToolStatus => _deviceTools.Status;
+    public string RecipeStatus { get; private set; } = "Waiting for connection";
     public bool IsConnected => _socket?.State == WebSocketState.Open;
     private string _baseUrl;
     private string _linkKey;
@@ -91,6 +92,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         _started = true;
         _socketTask = Task.Run(() => RunSocketLoopAsync(_shutdown.Token));
         _workerTask = Task.Run(() => RunWorkerLoopAsync(_shutdown.Token));
+        _ = Task.Run(() => RunRecipeProfileLoopAsync(_shutdown.Token));
         _inventoryTask = Task.Run(() => RunInventoryLoopAsync(_shutdown.Token));
     }
 
@@ -338,7 +340,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 response.EnsureSuccessStatusCode();
                 return JObject.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
             }
-            void Synced(List<string> hashes) { lock (_knownHashesLock) { _knownHashes.Clear(); _knownHashes.UnionWith(hashes); } }
+            void Synced(List<string> hashes) { ArcEnCielLinkResources.RequestRefresh(); lock (_knownHashesLock) { _knownHashes.Clear(); _knownHashes.UnionWith(hashes); } }
             _deviceTools.Start(msg, ArcEnCielLinkAttempt.RuntimeId, ArcEnCielLinkPaths.GetModelRoots, Post,
                 (meta, hash, path, cancellation) => ArcEnCielLinkSidecars.RepairMissingAsync(this, config, _http, meta, hash, path, cancellation), Synced, _attempt is not null);
             return;
@@ -494,6 +496,72 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         }
     }
 
+
+    public async Task<(string Body, int Status)> DraftRequestAsync(string action, string body, CancellationToken cancellation)
+    {
+        if (action is not ("inbox" or "event")) return ("{\"code\":\"INVALID_NATIVE_ACTION\"}", 400);
+        if (!IsConnected) return ("{\"code\":\"WORKER_OFFLINE\"}", 409);
+        try
+        {
+            var payload = Newtonsoft.Json.Linq.JObject.Parse(body);
+            string[] allowed = action == "inbox" ? ["receiveOnly"] : ["id", "editorId", "action", "fields", "receipt"];
+            if (payload.Properties().Any(p => !allowed.Contains(p.Name))) return ("{\"code\":\"INVALID_NATIVE_PAYLOAD\"}", 400);
+            payload["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId;
+            using HttpRequestMessage request = new(HttpMethod.Post, _baseUrl + "/handoffs/" + action) { Content = new StringContent(payload.ToString(), Encoding.UTF8, "application/json") };
+            ApplyAuthHeaders(request);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            using var response = await _privateHttp.SendAsync(request, timeout.Token);
+            int status = (int)response.StatusCode;
+            if (status == 403) return ("{\"code\":\"DRAFT_PERMISSION_REQUIRED\"}", status);
+            if (status is not (200 or 400 or 404 or 409)) return ("{\"code\":\"LINK_INBOX_UNAVAILABLE\"}", 503);
+            return (await response.Content.ReadAsStringAsync(timeout.Token), status);
+        }
+        catch (Exception) { return ("{\"code\":\"LINK_INBOX_UNAVAILABLE\"}", 503); }
+    }
+
+    private async Task RunRecipeProfileLoopAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            if (IsConnected)
+            {
+                try
+                {
+                    var profile = new {
+                        schemaVersion = 1, host = "swarmui",
+                        fields = new[] { "prompt", "negativePrompt", "seed", "steps", "cfg", "width", "height", "sampler", "scheduler" },
+                        samplers = SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.Samplers.Select(v => v.Split("///")[0]).ToArray(),
+                        schedulers = SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.Schedulers.Select(v => v.Split("///")[0]).ToArray(),
+                        maxSeed = "9007199254740991", templates = new[] { "basic_checkpoint_v1" }
+                    };
+                    using HttpRequestMessage request = new(HttpMethod.Post, _baseUrl + "/recipe/profile") {
+                        Content = new StringContent(JsonSerializer.Serialize(new { runtimeId = ArcEnCielLinkAttempt.RuntimeId, profile }), Encoding.UTF8, "application/json")
+                    };
+                    ApplyAuthHeaders(request);
+                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    timeout.CancelAfter(TimeSpan.FromSeconds(15));
+                    using var response = await _privateHttp.SendAsync(request, timeout.Token);
+                    response.EnsureSuccessStatusCode();
+                    RecipeStatus = "Recipe check ready";
+                    try
+                    {
+                        var inventory = ArcEnCielLinkResources.Collect(_hashes, _deviceTools);
+                        using HttpRequestMessage inventoryRequest = new(HttpMethod.Post, _baseUrl + "/resources/inventory") { Content = new StringContent(JsonSerializer.Serialize(new { runtimeId = ArcEnCielLinkAttempt.RuntimeId, inventory }), Encoding.UTF8, "application/json") };
+                        ApplyAuthHeaders(inventoryRequest);
+                        using var inventoryResponse = await _privateHttp.SendAsync(inventoryRequest, timeout.Token);
+                        inventoryResponse.EnsureSuccessStatusCode();
+                    }
+                    catch (Exception) { RecipeStatus = "Recipe ready; resource inventory needs a refresh"; }
+                    await DraftRequestAsync("inbox", "{\"receiveOnly\":true}", timeout.Token);
+                }
+                catch (Exception) { RecipeStatus = "Recipe check unavailable; refresh after reconnecting"; }
+            }
+            else { RecipeStatus = "Waiting for connection"; }
+            await Task.Delay(TimeSpan.FromSeconds(30), token);
+        }
+    }
+
     private async Task RunInventoryLoopAsync(CancellationToken token)
     {
         while (!token.IsCancellationRequested)
@@ -546,6 +614,12 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         if (!HasEnoughFreeSpace(targetDir))
         {
             await ReportProgressAsync(job.Id, state: "ERROR", message: $"Less than {_minFreeMb} MB free", token: token);
+            return;
+        }
+
+        if (ArcEnCielLinkResources.HasVerifiedFile(job.Sha256, _hashes, _deviceTools))
+        {
+            await ReportProgressAsync(job.Id, progress: 100, state: "DONE", message: "ALREADY_PRESENT: Model already exists on this device.", token: token);
             return;
         }
 
@@ -608,6 +682,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 catch { sidecarWarning = true; }
             }
 
+            ArcEnCielLinkResources.RequestRefresh();
             List<string> hashes = _hashes.UpdateCachedHash(destPath, shaLocal);
             await SyncInventoryAsync(hashes, token);
             await ReportProgressAsync(job.Id, progress: 100, state: "DONE", message: sidecarWarning ? "SIDECAR_WARNING: Model saved. Repair missing metadata in Device tools." : null, token: token);
@@ -821,7 +896,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
             ["clientVersion"] = ArcEnCielLinkProtocol.Version,
             ["protocolVersion"] = ArcEnCielLinkProtocol.ProtocolVersion,
             ["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId,
-            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability, "job_lease_v1", "setup_check_v1", "device_tools_v1" }
+            ["capabilities"] = new[] { ArcEnCielLinkProtocol.PrivateDownloadGrantCapability, "job_lease_v1", "setup_check_v1", "device_tools_v1", "recipe_preflight_v1", "draft_import_v1", "resource_inventory_v1" }
         };
         await SendMessageAsync(payload, token);
     }
@@ -929,7 +1004,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         socket.Options.SetRequestHeader("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
         socket.Options.SetRequestHeader("x-arcenciel-link-runtime", ArcEnCielLinkAttempt.RuntimeId);
         socket.Options.SetRequestHeader("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
-        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1,device_tools_v1");
+        socket.Options.SetRequestHeader("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1,device_tools_v1,recipe_preflight_v1,draft_import_v1,resource_inventory_v1");
 
         if (!string.IsNullOrWhiteSpace(_linkKey))
         {
@@ -1083,7 +1158,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-client", $"{ArcEnCielLinkProtocol.ClientId}/{ArcEnCielLinkProtocol.Version}");
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-runtime", ArcEnCielLinkAttempt.RuntimeId);
         request.Headers.TryAddWithoutValidation("x-arcenciel-link-protocol", ArcEnCielLinkProtocol.ProtocolVersion.ToString());
-        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1,device_tools_v1");
+        request.Headers.TryAddWithoutValidation("x-arcenciel-link-capabilities", ArcEnCielLinkProtocol.PrivateDownloadGrantCapability + ",job_lease_v1,setup_check_v1,device_tools_v1,recipe_preflight_v1,draft_import_v1,resource_inventory_v1");
     }
 
     private string ResolveDownloadUrl(string urlRaw)
