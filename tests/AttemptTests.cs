@@ -10,10 +10,12 @@ internal static class AttemptTests
     {
         public HttpStatusCode Status = HttpStatusCode.OK;
         public string State = "DOWNLOADING";
+        public int TransientFailures;
         public readonly List<JObject> Requests = new();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Requests.Add(JObject.Parse(await request.Content!.ReadAsStringAsync(token)));
+            if (request.Content is not null && Requests.Last().Value<string>("action") == "cancel_ack" && TransientFailures-- > 0) throw new HttpRequestException("temporary");
             return new HttpResponseMessage(Status) { Content = new StringContent(new JObject { ["state"] = State }.ToString()) };
         }
     }
@@ -34,6 +36,17 @@ internal static class AttemptTests
             try { await blocked; throw new Exception("Blocking transfer was not interrupted"); } catch (OperationCanceledException) { }
         }
         Check(handler.Requests.Last().Value<string>("action") == "cancel_ack", "Cancellation cleanup was not acknowledged");
+        await using (ArcEnCielLinkAttempt late = new(1, "attempt-late", "http://localhost", http, _ => { }, CancellationToken.None))
+        {
+            await late.StartAsync();
+            late.Cancel(1, "attempt-late", ArcEnCielLinkAttempt.RuntimeId);
+            handler.Status = HttpStatusCode.Conflict;
+            try { await late.RenewAsync(); } catch (OperationCanceledException) { }
+            Check(late.Cancelled, "Late heartbeat cleared cancellation");
+            handler.Status = HttpStatusCode.OK;
+            handler.TransientFailures = 2;
+        }
+        Check(handler.Requests.TakeLast(3).All(x => x.Value<string>("action") == "cancel_ack"), "Transient acknowledgement was not retried");
         foreach (HttpStatusCode status in new[] { HttpStatusCode.BadRequest, HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden, HttpStatusCode.NotFound, HttpStatusCode.Conflict })
         {
             handler.Status = status;

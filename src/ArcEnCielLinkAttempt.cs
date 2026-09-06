@@ -7,6 +7,7 @@ namespace ArcEnCiel.Link.Swarm;
 
 internal sealed class ArcEnCielLinkAttempt : IAsyncDisposable
 {
+    private sealed class AttemptEndedException(CancellationToken token) : OperationCanceledException("Download attempt ended", token) { }
     public static readonly string RuntimeId = Guid.NewGuid().ToString();
     private readonly HttpClient _http;
     private readonly Action<HttpRequestMessage> _authenticate;
@@ -50,7 +51,7 @@ internal sealed class ArcEnCielLinkAttempt : IAsyncDisposable
     public async Task RenewAsync(string action = "heartbeat")
     {
         if (AttemptId is null) return;
-        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(10));
+        using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(action == "cancel_ack" ? 5 : 10));
         JObject body = Fields();
         body["action"] = action;
         using HttpRequestMessage request = new(HttpMethod.Post, _url)
@@ -61,9 +62,9 @@ internal sealed class ArcEnCielLinkAttempt : IAsyncDisposable
             or HttpStatusCode.NotFound or HttpStatusCode.Conflict)
         {
             JObject result = JObject.Parse(await response.Content.ReadAsStringAsync(timeout.Token));
-            Cancelled = result.Value<string>("state") == "CANCELLED";
+            if (result.Value<string>("state") == "CANCELLED") Cancelled = true;
             _stop.Cancel();
-            throw new OperationCanceledException("Download attempt ended", Token);
+            throw new AttemptEndedException(Token);
         }
         response.EnsureSuccessStatusCode();
         // Stop locally well before the server's 90-second lease can be reassigned.
@@ -90,7 +91,12 @@ internal sealed class ArcEnCielLinkAttempt : IAsyncDisposable
         if (_heartbeat is not null) await _heartbeat;
         if (Cancelled && AttemptId is not null)
         {
-            try { await RenewAsync("cancel_ack"); } catch (Exception) { }
+            for (int retry = 0; retry < 3; retry++)
+            {
+                try { await RenewAsync("cancel_ack"); break; }
+                catch (AttemptEndedException) { break; }
+                catch (Exception) { if (retry < 2) await Task.Delay(TimeSpan.FromSeconds(retry + 1)); }
+            }
         }
         _finished.Dispose();
         _stop.Dispose();
