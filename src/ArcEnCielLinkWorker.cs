@@ -504,7 +504,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         try
         {
             var payload = Newtonsoft.Json.Linq.JObject.Parse(body);
-            string[] allowed = action == "inbox" ? ["receiveOnly"] : ["id", "editorId", "action", "fields", "receipt"];
+            string[] allowed = action == "inbox" ? ["receiveOnly", "id"] : ["id", "editorId", "action", "fields", "receipt"];
             if (payload.Properties().Any(p => !allowed.Contains(p.Name))) return ("{\"code\":\"INVALID_NATIVE_PAYLOAD\"}", 400);
             payload["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId;
             using HttpRequestMessage request = new(HttpMethod.Post, _baseUrl + "/handoffs/" + action) { Content = new StringContent(payload.ToString(), Encoding.UTF8, "application/json") };
