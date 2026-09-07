@@ -504,7 +504,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
         try
         {
             var payload = Newtonsoft.Json.Linq.JObject.Parse(body);
-            string[] allowed = action == "inbox" ? ["receiveOnly", "id"] : ["id", "editorId", "action", "fields", "receipt"];
+            string[] allowed = action == "inbox" ? ["receiveOnly", "id"] : ["id", "editorId", "action", "fields", "receipt", "resourceSelection", "localPrompts"];
             if (payload.Properties().Any(p => !allowed.Contains(p.Name))) return ("{\"code\":\"INVALID_NATIVE_PAYLOAD\"}", 400);
             payload["runtimeId"] = ArcEnCielLinkAttempt.RuntimeId;
             using HttpRequestMessage request = new(HttpMethod.Post, _baseUrl + "/handoffs/" + action) { Content = new StringContent(payload.ToString(), Encoding.UTF8, "application/json") };
@@ -529,7 +529,7 @@ internal sealed class ArcEnCielLinkWorker : IDisposable
                 try
                 {
                     var profile = new {
-                        schemaVersion = 1, host = "swarmui",
+                        schemaVersion = 1, host = "swarmui", draftSelection = 1,
                         fields = new[] { "prompt", "negativePrompt", "seed", "steps", "cfg", "width", "height", "sampler", "scheduler", "checkpoint", "loras", "vae" },
                         samplers = SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.Samplers.Select(v => v.Split("///")[0]).ToArray(),
                         schedulers = SwarmUI.Builtin_ComfyUIBackend.ComfyUIBackendExtension.Schedulers.Select(v => v.Split("///")[0]).ToArray(),
