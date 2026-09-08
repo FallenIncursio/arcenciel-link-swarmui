@@ -1,8 +1,6 @@
 using System;
-using System.Collections.Concurrent;
 using System.IO;
 using System.Net.Http;
-using System.Security.Cryptography;
 using Newtonsoft.Json.Linq;
 
 namespace ArcEnCiel.Link.Swarm;
@@ -15,8 +13,8 @@ internal sealed class ArcEnCielLinkDeviceTools
     private JObject? _state;
     private DateTimeOffset _lastAck;
     private readonly SemaphoreSlim _reportGate = new(1, 1);
-    private readonly ConcurrentDictionary<string, (long Mtime, long Size, string Hash)> _cache = new();
-    public List<(string Path, string Hash, long Mtime, long Size)> CachedFiles() => _cache.Select(p => (p.Key, p.Value.Hash, p.Value.Mtime, p.Value.Size)).ToList();
+    private readonly ArcEnCielLinkHashCache _cache = ArcEnCielLinkHashCache.Shared;
+    public List<(string Path, string Hash, long Mtime, long Size)> CachedFiles() => _cache.Snapshot();
     public JObject? Status { get { lock (_gate) return _state is null ? null : (JObject)_state.DeepClone(); } }
     private bool _running;
     private bool _finishing;
@@ -106,7 +104,7 @@ internal sealed class ArcEnCielLinkDeviceTools
         return true;
     }
 
-    private async Task<List<(string Hash, string Path)>> Scan(IEnumerable<string> roots, CancellationToken token)
+    private Task<List<(string Hash, string Path)>> Scan(IEnumerable<string> roots, CancellationToken token)
     {
         HashSet<string> files = new(StringComparer.Ordinal);
         string[] extensions = [".safetensors", ".ckpt", ".pt", ".sft", ".gguf"];
@@ -123,22 +121,13 @@ internal sealed class ArcEnCielLinkDeviceTools
         }
         Set("total", files.Count); Set("processed", 0);
         List<(string Hash, string Path)> result = [];
-        foreach (string path in files.OrderBy(p => p, StringComparer.Ordinal)) {
-            token.ThrowIfCancellationRequested();
-            FileInfo before = new(path); long stamp = before.LastWriteTimeUtc.Ticks, size = before.Length;
-            string digest;
-            if (_cache.TryGetValue(path, out var cached) && cached.Mtime == stamp && cached.Size == size) digest = cached.Hash;
-            else {
-                await using FileStream stream = File.OpenRead(path);
-                using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                byte[] buffer = new byte[1024 * 1024]; int n;
-                while ((n = await stream.ReadAsync(buffer, token)) > 0) { token.ThrowIfCancellationRequested(); hash.AppendData(buffer, 0, n); }
-                FileInfo after = new(path); if (after.LastWriteTimeUtc.Ticks != stamp || after.Length != size) throw new IOException();
-                digest = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant(); _cache[path] = (stamp, size, digest);
+        try {
+            foreach (string path in files.OrderBy(p => p, StringComparer.Ordinal)) {
+                token.ThrowIfCancellationRequested();
+                result.Add((_cache.Get(path, token), path)); Increment("processed");
             }
-            result.Add((digest, path)); Increment("processed");
         }
-        foreach (string old in _cache.Keys.Where(k => !files.Contains(k)).ToArray()) _cache.TryRemove(old, out _);
-        return result;
+        finally { _cache.Flush(); }
+        return Task.FromResult(result);
     }
 }

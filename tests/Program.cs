@@ -86,6 +86,7 @@ namespace ContractTests
                 AttemptTests.Run().GetAwaiter().GetResult();
                 SetupCheckTests.Run().GetAwaiter().GetResult();
                 DeviceToolsTests.Run().GetAwaiter().GetResult();
+                HashCacheTests.Run();
                 Console.WriteLine($"PASS: {count} shared startup cases plus persistence, restart, managed-key and missing-key checks");
             }
             finally { ClearEnvironment(); Directory.Delete(root, true); }
@@ -95,4 +96,4 @@ namespace ContractTests
 }
 
 namespace SwarmUI.Core { public static class Program { public static string DataDir = ""; } }
-namespace SwarmUI.Utils { public static class Logs { public static void Error(string message) { } } }
+namespace SwarmUI.Utils { public static class Logs { public static void Error(string message) { } public static void Info(string message) { } } }

@@ -16,7 +16,7 @@ internal static class ArcEnCielLinkResources
     public static bool HasVerifiedFile(string? digest, ArcEnCielLinkHashes hashes, ArcEnCielLinkDeviceTools tools)
     {
         if (string.IsNullOrEmpty(digest) || digest.Length != 64 || digest.Any(c => !char.IsAsciiHexDigit(c))) return false;
-        foreach (var cached in hashes.CachedFiles().Concat(tools.CachedFiles()))
+        foreach (var cached in hashes.CachedFiles())
         {
             if (!string.Equals(digest, cached.Hash, StringComparison.OrdinalIgnoreCase)) continue;
             try
@@ -32,11 +32,12 @@ internal static class ArcEnCielLinkResources
 
     public static Inventory Collect(ArcEnCielLinkHashes hashes, ArcEnCielLinkDeviceTools tools)
     {
-        if (Interlocked.Exchange(ref _refresh, 0) == 1)
+        bool cacheChanged = ArcEnCielLinkHashCache.Shared.TakeCatalogChange();
+        if (Interlocked.Exchange(ref _refresh, 0) == 1 || cacheChanged)
         {
             foreach (var pair in Kinds) if (Program.T2IModelSets.TryGetValue(pair.Key, out var handler)) handler.Refresh();
         }
-        var cached = hashes.CachedFiles().Concat(tools.CachedFiles()).ToList();
+        var cached = hashes.CachedFiles().ToList();
         var cachedByPath = cached.ToLookup(c => Path.GetFullPath(c.Path), OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         HashSet<string> used = new();
         bool complete = hashes.InventoryComplete || tools.Status?.Value<string>("state") == "DONE";

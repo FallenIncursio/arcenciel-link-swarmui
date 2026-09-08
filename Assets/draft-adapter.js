@@ -224,7 +224,7 @@
     link.href = "#aec-link-inbox";
     link.id = "aec-link-inbox-tab";
     link.setAttribute("role", "tab");
-    link.textContent = "Link inbox";
+    link.textContent = "Arc en Ciel Link";
     item.append(link);
     tabs.insertBefore(
       item,
